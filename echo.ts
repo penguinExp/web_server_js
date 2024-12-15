@@ -28,7 +28,6 @@ function soInit(socket: net.Socket): TCPConn {
   };
 
   socket.on("data", (data: Buffer) => {
-    // TODO: How it works?
     console.assert(conn.reader);
 
     // pause the 'data' event until the next read
@@ -63,8 +62,8 @@ function soInit(socket: net.Socket): TCPConn {
 
 // returns an empty `Buffer` after EOF
 function soRead(conn: TCPConn): Promise<Buffer> {
-  // TODO: What and Why?
-  console.assert(!conn.reader); // no concurrent calls
+  // reader should be null, so we can avoid concurrent calls
+  console.assert(!conn.reader);
 
   return new Promise((resolve, reject) => {
     // if the connection is not readable, complete the promise
@@ -81,7 +80,7 @@ function soRead(conn: TCPConn): Promise<Buffer> {
     // save the promise callbacks
     conn.reader = { reject, resolve };
 
-    // TODO: How the heck the [pause] and [resume] working
+    // the 'data' callback of the socket pauses after reading
     // resume the 'data' event to fulfill the promise later
     conn.socket.resume();
   });
