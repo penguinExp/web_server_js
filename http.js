@@ -50,6 +50,18 @@ var __generator = (this && this.__generator) || function (thisArg, body) {
         if (op[0] & 5) throw op[1]; return { value: op[0] ? op[1] : void 0, done: true };
     }
 };
+var __await = (this && this.__await) || function (v) { return this instanceof __await ? (this.v = v, this) : new __await(v); }
+var __asyncGenerator = (this && this.__asyncGenerator) || function (thisArg, _arguments, generator) {
+    if (!Symbol.asyncIterator) throw new TypeError("Symbol.asyncIterator is not defined.");
+    var g = generator.apply(thisArg, _arguments || []), i, q = [];
+    return i = {}, verb("next"), verb("throw"), verb("return"), i[Symbol.asyncIterator] = function () { return this; }, i;
+    function verb(n) { if (g[n]) i[n] = function (v) { return new Promise(function (a, b) { q.push([n, v, a, b]) > 1 || resume(n, v); }); }; }
+    function resume(n, v) { try { step(g[n](v)); } catch (e) { settle(q[0][3], e); } }
+    function step(r) { r.value instanceof __await ? Promise.resolve(r.value.v).then(fulfill, reject) : settle(q[0][2], r); }
+    function fulfill(value) { resume("next", value); }
+    function reject(value) { resume("throw", value); }
+    function settle(f, v) { if (f(v), q.shift(), q.length) resume(q[0][0], q[0][1]); }
+};
 exports.__esModule = true;
 var net = require("net");
 // the maximum length of an HTTP header
@@ -279,6 +291,60 @@ function validateHeader(header) {
     }
     return true;
 }
+function readerFromGenerator(gen) {
+    var _this = this;
+    return {
+        length: -1,
+        read: function () { return __awaiter(_this, void 0, void 0, function () {
+            var r;
+            return __generator(this, function (_a) {
+                switch (_a.label) {
+                    case 0: return [4 /*yield*/, gen.next()];
+                    case 1:
+                        r = _a.sent();
+                        if (r.done || !r.value) {
+                            // Handle EOF or if the generator unexpectedly yields `undefined`
+                            return [2 /*return*/, Buffer.from("")]; // EOF
+                        }
+                        else {
+                            console.assert(r.value.length > 0); // `r.value` is guaranteed to be a Buffer
+                            return [2 /*return*/, r.value];
+                        }
+                        return [2 /*return*/];
+                }
+            });
+        }); }
+    };
+}
+// count to 99
+function countSheep() {
+    return __asyncGenerator(this, arguments, function countSheep_1() {
+        var i;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0:
+                    i = 0;
+                    _a.label = 1;
+                case 1:
+                    if (!(i < 100)) return [3 /*break*/, 6];
+                    // sleep 1s, then output the counter
+                    return [4 /*yield*/, __await(new Promise(function (resolve) { return setTimeout(resolve, 1000); }))];
+                case 2:
+                    // sleep 1s, then output the counter
+                    _a.sent();
+                    return [4 /*yield*/, __await(Buffer.from("".concat(i, "\n")))];
+                case 3: return [4 /*yield*/, _a.sent()];
+                case 4:
+                    _a.sent();
+                    _a.label = 5;
+                case 5:
+                    i++;
+                    return [3 /*break*/, 1];
+                case 6: return [2 /*return*/];
+            }
+        });
+    });
+}
 // parse an HTTP request header
 function parseHTTPReq(data) {
     // split the data into lines
@@ -302,6 +368,94 @@ function parseHTTPReq(data) {
         version: version,
         headers: headers
     };
+}
+function bufExpectMore(conn, buf, context) {
+    return __awaiter(this, void 0, void 0, function () {
+        var newData;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0: return [4 /*yield*/, soRead(conn)];
+                case 1:
+                    newData = _a.sent();
+                    if (!newData || newData.length === 0) {
+                        throw new Error("Unexpected end of data while reading ".concat(context, "."));
+                    }
+                    buf.data = Buffer.concat([buf.data, newData]);
+                    buf.length += newData.length;
+                    return [2 /*return*/];
+            }
+        });
+    });
+}
+function readChunks(conn, buf) {
+    return __asyncGenerator(this, arguments, function readChunks_1() {
+        var last, idx, sizeLine, remain, consume, data, crlf;
+        return __generator(this, function (_a) {
+            switch (_a.label) {
+                case 0:
+                    last = false;
+                    _a.label = 1;
+                case 1:
+                    if (!!last) return [3 /*break*/, 13];
+                    idx = buf.data.subarray(0, buf.length).indexOf("\r\n");
+                    if (!(idx < 0)) return [3 /*break*/, 3];
+                    // Need more data if CRLF is not found
+                    return [4 /*yield*/, __await(bufExpectMore(conn, buf, "chunk size"))];
+                case 2:
+                    // Need more data if CRLF is not found
+                    _a.sent();
+                    return [3 /*break*/, 12];
+                case 3:
+                    sizeLine = buf.data.subarray(0, idx).toString("latin1").trim();
+                    remain = void 0;
+                    try {
+                        remain = parseInt(sizeLine, 16); // Parse hex chunk size
+                        if (isNaN(remain) || remain < 0) {
+                            throw new Error("Invalid chunk size.");
+                        }
+                    }
+                    catch (err) {
+                        throw new Error("Failed to parse chunk size: ".concat(sizeLine));
+                    }
+                    bufPop(buf, idx + 2); // Remove the chunk size line and CRLF
+                    // Check if this is the last chunk
+                    last = remain === 0;
+                    _a.label = 4;
+                case 4:
+                    if (!(remain > 0)) return [3 /*break*/, 9];
+                    if (!(buf.length === 0)) return [3 /*break*/, 6];
+                    return [4 /*yield*/, __await(bufExpectMore(conn, buf, "chunk data"))];
+                case 5:
+                    _a.sent();
+                    _a.label = 6;
+                case 6:
+                    consume = Math.min(remain, buf.length);
+                    data = Buffer.from(buf.data.subarray(0, consume));
+                    bufPop(buf, consume);
+                    remain -= consume;
+                    return [4 /*yield*/, __await(data)];
+                case 7: return [4 /*yield*/, _a.sent()];
+                case 8:
+                    _a.sent();
+                    return [3 /*break*/, 4];
+                case 9:
+                    if (!(buf.length < 2)) return [3 /*break*/, 11];
+                    return [4 /*yield*/, __await(bufExpectMore(conn, buf, "CRLF after chunk data"))];
+                case 10:
+                    _a.sent();
+                    _a.label = 11;
+                case 11:
+                    crlf = buf.data.subarray(0, 2).toString("latin1");
+                    if (crlf !== "\r\n") {
+                        throw new Error("Invalid chunk data termination (missing CRLF).");
+                    }
+                    bufPop(buf, 2); // Remove CRLF
+                    _a.label = 12;
+                case 12: return [3 /*break*/, 1];
+                case 13: return [2 /*return*/];
+            }
+        });
+    });
 }
 // BodyReader from an HTTP request
 function readerFromReq(conn, buf, req) {
@@ -328,10 +482,12 @@ function readerFromReq(conn, buf, req) {
     }
     else if (chunked) {
         // chunked encoding
-        throw new HTTPError(501, "TODO");
+        return readerFromGenerator(readChunks(conn, buf));
     }
     else {
         // read the rest of the connection
+        // TODO: Do this
+        // return readFromConnEOF(conn, buf);
         throw new HTTPError(501, "TODO");
     }
 }
@@ -379,6 +535,9 @@ function handleReq(req, body) {
                     // http echo server
                     resp = body;
                     break;
+                case "/sheep":
+                    resp = readerFromGenerator(countSheep());
+                    break;
                 default:
                     resp = readerFromMemory(Buffer.from("hello world.\n"));
                     break;
@@ -414,35 +573,46 @@ function readerFromMemory(data) {
 // end an HTTP response through the socket
 function writeHTTPResp(conn, resp) {
     return __awaiter(this, void 0, void 0, function () {
-        var data;
+        var crlf, last, data;
         return __generator(this, function (_a) {
             switch (_a.label) {
                 case 0:
                     if (resp.body.length < 0) {
-                        throw new Error("TODO: chunked encoding");
+                        resp.headers.push(Buffer.from("Transfer-Encoding: chunked"));
                     }
-                    // set the "Content-Length" field
-                    console.assert(!fieldGet(resp.headers, "Content-Length"));
-                    resp.headers.push(Buffer.from("Content-Length: ".concat(resp.body.length)));
+                    else {
+                        resp.headers.push(Buffer.from("Content-Length: ".concat(resp.body.length)));
+                    }
                     // write the header
                     return [4 /*yield*/, soWrite(conn, encodeHTTPResp(resp))];
                 case 1:
                     // write the header
                     _a.sent();
+                    crlf = Buffer.from("\r\n");
+                    last = false;
                     _a.label = 2;
                 case 2:
-                    if (!true) return [3 /*break*/, 5];
+                    if (!!last) return [3 /*break*/, 6];
                     return [4 /*yield*/, resp.body.read()];
                 case 3:
                     data = _a.sent();
-                    if (data.length === 0) {
-                        return [3 /*break*/, 5];
+                    last = data.length == 0; // ended ??
+                    // chunked encoding
+                    if (resp.body.length < 0) {
+                        data = Buffer.concat([
+                            Buffer.from(data.length.toString(16)),
+                            crlf,
+                            data,
+                            crlf,
+                        ]);
                     }
+                    if (!data.length) return [3 /*break*/, 5];
                     return [4 /*yield*/, soWrite(conn, data)];
                 case 4:
                     _a.sent();
-                    return [3 /*break*/, 2];
-                case 5: return [2 /*return*/];
+                    _a.label = 5;
+                case 5: return [3 /*break*/, 2];
+                case 6: return [2 /*return*/];
             }
         });
     });

@@ -50,6 +50,8 @@ type BodyReader = {
   read: () => Promise<Buffer>;
 };
 
+type BufferGenerator = AsyncGenerator<Buffer, void, void>;
+
 class HTTPError extends Error {
   public statusCode: number;
 
@@ -327,6 +329,33 @@ function validateHeader(header: Buffer): boolean {
   return true;
 }
 
+function readerFromGenerator(gen: BufferGenerator): BodyReader {
+  return {
+    length: -1,
+    read: async (): Promise<Buffer> => {
+      const r = await gen.next();
+
+      if (r.done || !r.value) {
+        // Handle EOF or if the generator unexpectedly yields `undefined`
+        return Buffer.from(""); // EOF
+      } else {
+        console.assert(r.value.length > 0); // `r.value` is guaranteed to be a Buffer
+        return r.value;
+      }
+    },
+  };
+}
+
+// count to 99
+async function* countSheep(): BufferGenerator {
+  for (let i = 0; i < 100; i++) {
+    // sleep 1s, then output the counter
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
+    yield Buffer.from(`${i}\n`);
+  }
+}
+
 // parse an HTTP request header
 function parseHTTPReq(data: Buffer): HTTPReq {
   // split the data into lines
@@ -357,6 +386,74 @@ function parseHTTPReq(data: Buffer): HTTPReq {
     version: version,
     headers: headers,
   };
+}
+
+async function bufExpectMore(
+  conn: TCPConn,
+  buf: DynBuf,
+  context: string
+): Promise<void> {
+  const newData = await soRead(conn);
+
+  if (!newData || newData.length === 0) {
+    throw new Error(`Unexpected end of data while reading ${context}.`);
+  }
+
+  buf.data = Buffer.concat([buf.data, newData]);
+  buf.length += newData.length;
+}
+
+async function* readChunks(conn: TCPConn, buf: DynBuf): BufferGenerator {
+  for (let last = false; !last; ) {
+    // Find the end of the chunk size line
+    const idx = buf.data.subarray(0, buf.length).indexOf("\r\n");
+
+    if (idx < 0) {
+      // Need more data if CRLF is not found
+      await bufExpectMore(conn, buf, "chunk size");
+      continue;
+    }
+
+    // Parse the chunk size (hexadecimal) and remove the line
+    const sizeLine = buf.data.subarray(0, idx).toString("latin1").trim();
+    let remain: number;
+
+    try {
+      remain = parseInt(sizeLine, 16); // Parse hex chunk size
+      if (isNaN(remain) || remain < 0) {
+        throw new Error("Invalid chunk size.");
+      }
+    } catch (err) {
+      throw new Error(`Failed to parse chunk size: ${sizeLine}`);
+    }
+
+    bufPop(buf, idx + 2); // Remove the chunk size line and CRLF
+
+    // Check if this is the last chunk
+    last = remain === 0;
+
+    // Read and yield the chunk data
+    while (remain > 0) {
+      if (buf.length === 0) {
+        await bufExpectMore(conn, buf, "chunk data");
+      }
+      const consume = Math.min(remain, buf.length);
+      const data = Buffer.from(buf.data.subarray(0, consume));
+      bufPop(buf, consume);
+      remain -= consume;
+      yield data;
+    }
+
+    // Remove the CRLF following the chunk data
+    if (buf.length < 2) {
+      await bufExpectMore(conn, buf, "CRLF after chunk data");
+    }
+    const crlf = buf.data.subarray(0, 2).toString("latin1");
+    if (crlf !== "\r\n") {
+      throw new Error("Invalid chunk data termination (missing CRLF).");
+    }
+    bufPop(buf, 2); // Remove CRLF
+  }
 }
 
 // BodyReader from an HTTP request
@@ -391,9 +488,13 @@ function readerFromReq(conn: TCPConn, buf: DynBuf, req: HTTPReq): BodyReader {
     return readerFromConnLength(conn, buf, bodyLen);
   } else if (chunked) {
     // chunked encoding
-    throw new HTTPError(501, "TODO");
+    return readerFromGenerator(readChunks(conn, buf));
   } else {
     // read the rest of the connection
+
+    // TODO: Do this
+    // return readFromConnEOF(conn, buf);
+
     throw new HTTPError(501, "TODO");
   }
 }
@@ -433,15 +534,22 @@ function readerFromConnLength(
 async function handleReq(req: HTTPReq, body: BodyReader): Promise<HTTPRes> {
   // act on the request URI
   let resp: BodyReader;
+
   switch (req.uri.toString("latin1")) {
     case "/echo":
       // http echo server
       resp = body;
       break;
+
+    case "/sheep":
+      resp = readerFromGenerator(countSheep());
+      break;
+
     default:
       resp = readerFromMemory(Buffer.from("hello world.\n"));
       break;
   }
+
   return {
     code: 200,
     headers: [Buffer.from("Server: my_first_http_server")],
@@ -468,21 +576,34 @@ function readerFromMemory(data: Buffer): BodyReader {
 // end an HTTP response through the socket
 async function writeHTTPResp(conn: TCPConn, resp: HTTPRes): Promise<void> {
   if (resp.body.length < 0) {
-    throw new Error("TODO: chunked encoding");
+    resp.headers.push(Buffer.from("Transfer-Encoding: chunked"));
+  } else {
+    resp.headers.push(Buffer.from(`Content-Length: ${resp.body.length}`));
   }
-  // set the "Content-Length" field
-  console.assert(!fieldGet(resp.headers, "Content-Length"));
-  resp.headers.push(Buffer.from(`Content-Length: ${resp.body.length}`));
+
   // write the header
   await soWrite(conn, encodeHTTPResp(resp));
 
-  // write the body
-  while (true) {
-    const data = await resp.body.read();
-    if (data.length === 0) {
-      break;
+  const crlf = Buffer.from("\r\n");
+
+  for (let last = false; !last; ) {
+    let data = await resp.body.read();
+
+    last = data.length == 0; // ended ??
+
+    // chunked encoding
+    if (resp.body.length < 0) {
+      data = Buffer.concat([
+        Buffer.from(data.length.toString(16)),
+        crlf,
+        data,
+        crlf,
+      ]);
     }
-    await soWrite(conn, data);
+
+    if (data.length) {
+      await soWrite(conn, data);
+    }
   }
 }
 
