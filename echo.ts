@@ -1,4 +1,3 @@
-import { connect } from "http2";
 import * as net from "net";
 
 // A promise based api for TCP Sockets
@@ -17,6 +16,40 @@ type TCPConn = {
   // EOF, from the 'end' event
   ended: Boolean;
 };
+
+// a dynamic size buffer
+type DynBuffer = {
+  data: Buffer;
+  length: number;
+};
+
+// append data to DynBuffer
+function bufPush(buf: DynBuffer, data: Buffer): void {
+  const newLen = buf.length + data.length;
+
+  if (buf.data.length < newLen) {
+    // grow the capacity by the power if two
+    let cap = Math.max(buf.data.length, 32);
+
+    while (cap < newLen) {
+      cap *= 2;
+    }
+
+    const grown = Buffer.alloc(cap);
+    buf.data.copy(grown, 0, 0);
+
+    buf.data = grown;
+  }
+
+  data.copy(buf.data, buf.length, 0);
+  buf.length = newLen;
+}
+
+// remove the data from the front
+function bufPop(buf: DynBuffer, len: number): void {
+  buf.data.copyWithin(0, len, buf.length);
+  buf.length -= len;
+}
 
 // creates a wrapper from net.Socket
 function soInit(socket: net.Socket): TCPConn {
@@ -117,20 +150,56 @@ async function newConnection(socket: net.Socket): Promise<void> {
   }
 }
 
+function cutMessage(buf: DynBuffer): null | Buffer {
+  // messages are separated by '\n'
+  const idx = buf.data.subarray(0, buf.length).indexOf("\n");
+
+  if (idx < 0) {
+    return null; // not complete
+  }
+
+  // make a copy of the message and move the remaining data to the front
+  const msg = Buffer.from(buf.data.subarray(0, idx + 1));
+  bufPop(buf, idx + 1);
+
+  return msg;
+}
+
 async function serveClient(socket: net.Socket): Promise<void> {
   const conn: TCPConn = soInit(socket);
+  const buf: DynBuffer = { data: Buffer.alloc(0), length: 0 };
 
   while (true) {
-    const data = await soRead(conn);
+    // try to get 1 msg from the buffer
+    const msg: null | Buffer = cutMessage(buf);
 
-    if (data.length === 0) {
-      console.log("EOC");
-      break;
+    if (!msg) {
+      // need more data
+      const data = await soRead(conn);
+      bufPush(buf, data);
+
+      // EOF?
+      if (data.length === 0) {
+        console.log("EOC");
+
+        return;
+      }
+
+      // got some data, try it again
+      continue;
     }
 
-    console.log(`[DATA]: ${data}`);
-    await soWrite(conn, data);
-  }
+    // Process the message and send the response
+    if (msg.equals(Buffer.from("quit\n"))) {
+      await soWrite(conn, Buffer.from("bye\n"));
+      socket.destroy();
+
+      return;
+    } else {
+      const reply = Buffer.concat([Buffer.from("ECHO: "), msg]);
+      await soWrite(conn, reply);
+    }
+  } // loop for messages
 }
 
 const server = net.createServer({
