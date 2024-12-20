@@ -1,4 +1,5 @@
 import * as net from "net";
+import * as fs from "fs/promises";
 
 // the maximum length of an HTTP header
 const kMaxHeaderLen = 1024 * 8;
